@@ -18,10 +18,8 @@ class MainActivity : ComponentActivity() {
         setContent {
             BBDDTheme {
                 val sharedPreferences = getSharedPreferences(Datos.PREF_NAME, Context.MODE_PRIVATE)
-                // Crear la base de datos Room aquí - AHORA SOLO CON EL CONTEXT
-                val database = AppDatabase.getDatabase(this, GlobalScope) // <-- Ya no se pasa 'scope'
+                val database = AppDatabase.getDatabase(this, GlobalScope)
                 val jugadorDao = database.jugadorDao()
-                // Usar la factory que recibe el DAO y SharedPreferences
                 val miViewModel: MyViewModel = viewModel(
                     factory = MyViewModelFactory(jugadorDao, sharedPreferences)
                 )
