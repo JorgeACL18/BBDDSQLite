@@ -7,6 +7,9 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.bbdd.DAO.AppDatabase
+import com.example.bbdd.DAO.DAO
+import com.example.bbdd.DAO.Jugador
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -16,45 +19,69 @@ import java.util.Date
 import java.util.Locale
 import kotlin.random.Random
 
-class MyViewModelFactory(private val context: Context) : ViewModelProvider.Factory {
+class MyViewModelFactory(
+    private val jugadorDao: DAO, // Recibe el DAO directamente
+    private val sharedPreferences: SharedPreferences
+) : ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(MyViewModel::class.java)) {
             @Suppress("UNCHECKED_CAST")
-            return MyViewModel(context.getSharedPreferences(Datos.PREF_NAME, Context.MODE_PRIVATE)) as T
+            return MyViewModel(jugadorDao, sharedPreferences) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class")
     }
 }
 
-class MyViewModel(private val sharedPreferences: SharedPreferences) : ViewModel() {
+class MyViewModel(
+    private val jugadorDao: DAO,
+    private val sharedPreferences: SharedPreferences
+) : ViewModel() {
 
-    private val TAG_LOG = "miDebug"
+    val TAG_LOG = "miDebug"
 
-    private val _estadoActual = MutableStateFlow(Estados.INICIO)
+    val _estadoActual = MutableStateFlow(Estados.INICIO)
     val estadoActual: StateFlow<Estados> = _estadoActual
 
-    private val _secuencia = mutableStateListOf<Int>()
-    private val _nivelActual = MutableStateFlow(1)
+    val _secuencia = mutableStateListOf<Int>()
+    val _nivelActual = MutableStateFlow(1)
     val nivelActual: StateFlow<Int> = _nivelActual
 
-    private val _recordNivel = MutableStateFlow(sharedPreferences.getInt(Datos.KEY_MAX_LEVEL, 0))
+    // Nuevo StateFlow para exponer el récord almacenado en SharedPreferences
+    val _recordNivel = MutableStateFlow(sharedPreferences.getInt(Datos.KEY_MAX_LEVEL, 0))
     val recordNivel: StateFlow<Int> = _recordNivel
 
-    private val _recordFecha = MutableStateFlow(sharedPreferences.getString(Datos.KEY_DATETIME, "") ?: "")
+    val _recordFecha = MutableStateFlow(sharedPreferences.getString(Datos.KEY_DATETIME, "") ?: "")
     val recordFecha: StateFlow<String> = _recordFecha
 
-    private val _indiceJugador = MutableStateFlow(0)
-     val _tiempoRestante = MutableStateFlow(0)
-    private var _tiempoTotalPartida = 0
+    // Nuevo StateFlow para exponer el jugador con récord de la base de datos Room
+    val _jugadorRecord = MutableStateFlow<Jugador?>(null)
+    val jugadorRecord: StateFlow<Jugador?> = _jugadorRecord
 
-    private val _botonIluminado = MutableStateFlow<Int?>(null)
+    val _indiceJugador = MutableStateFlow(0)
+    val _tiempoRestante = MutableStateFlow(0)
+
+    val _botonIluminado = MutableStateFlow<Int?>(null)
     val botonIluminado: StateFlow<Int?> = _botonIluminado
 
-    private var _temporizadorActivo = false
-    private var _nivelMaximo = 10
+    var _temporizadorActivo = false
+    var _nivelMaximo = 10
 
     init {
-        Log.d(TAG_LOG, "ViewModel iniciado - Record: ${_recordNivel.value} en ${_recordFecha.value}")
+        Log.d(TAG_LOG, "ViewModel iniciado - Record SP: ${_recordNivel.value} en ${_recordFecha.value}")
+        cargarJugadorRecordBD()
+    }
+
+    private fun cargarJugadorRecordBD() {
+        viewModelScope.launch {
+            try {
+                Log.d(TAG_LOG, "Cargando jugador récord desde la base de datos Room...")
+                val jugadorRecordDB = jugadorDao.getRecord()
+                _jugadorRecord.value = jugadorRecordDB
+                Log.d(TAG_LOG, "Jugador récord cargado de Room: ${jugadorRecordDB?.nombre} con ${jugadorRecordDB?.max}")
+            } catch (e: Exception) {
+                Log.e(TAG_LOG, "Error al cargar jugador récord desde Room BD: ${e.message}", e)
+            }
+        }
     }
 
     fun iniciarJuego() {
@@ -64,7 +91,7 @@ class MyViewModel(private val sharedPreferences: SharedPreferences) : ViewModel(
         _secuencia.clear()
         _indiceJugador.value = 0
         _tiempoRestante.value = calcularTiempoPorNivel(1)
-        _estadoActual.value = Estados.MOSTRANDO_SEC // Cambia a MOSTRANDO_SEC
+        _estadoActual.value = Estados.MOSTRANDO_SEC
         Log.d(TAG_LOG, "Iniciando juego... Estado después de cambiar a MOSTRANDO_SEC: ${_estadoActual.value.name}")
         iniciarNivel()
     }
@@ -153,11 +180,10 @@ class MyViewModel(private val sharedPreferences: SharedPreferences) : ViewModel(
 
     private fun perderJuego() {
         val nivelActual = _nivelActual.value
-        val recordActual = _recordNivel.value
-        Log.d(TAG_LOG, "Intento fallido en nivel: $nivelActual. Récord anterior: $recordActual")
-
-        if (nivelActual > recordActual) {
-            Log.d(TAG_LOG, "¡Nuevo récord! Nivel: $nivelActual")
+        val recordActualSP = _recordNivel.value
+        Log.d(TAG_LOG, "Intento fallido en nivel: $nivelActual. Récord SP anterior: $recordActualSP")
+        if (nivelActual > recordActualSP) {
+            Log.d(TAG_LOG, "¡Nuevo récord en SharedPreferences! Nivel: $nivelActual")
             val currentTime = SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault()).format(Date())
             sharedPreferences.edit()
                 .putInt(Datos.KEY_MAX_LEVEL, nivelActual)
@@ -166,6 +192,35 @@ class MyViewModel(private val sharedPreferences: SharedPreferences) : ViewModel(
 
             _recordNivel.value = nivelActual
             _recordFecha.value = currentTime
+        }
+        val nombreJugador = "JugadorAnonimo"
+        viewModelScope.launch {
+            try {
+                Log.d(TAG_LOG, "Buscando jugador '$nombreJugador' en la base de datos Room...")
+                val jugadorExistente = jugadorDao.getNombre(nombreJugador)
+
+                if (jugadorExistente != null) {
+                    Log.d(TAG_LOG, "Jugador '$nombreJugador' encontrado en Room: ID ${jugadorExistente.id}, Puntuación ${jugadorExistente.max}")
+                    if (nivelActual > jugadorExistente.max) {
+                        Log.d(TAG_LOG, "¡Nuevo récord para $nombreJugador en Room BD! Nivel: $nivelActual (era ${jugadorExistente.max})") // Acceso a 'max' actualizado
+                        // Actualiza el jugador con la nueva puntuación
+                        val jugadorActualizado = jugadorExistente.copy(max = nivelActual)
+                        jugadorDao.actualizarJugador(jugadorActualizado)
+                        Log.d(TAG_LOG, "Jugador '$nombreJugador' actualizado en la base de datos Room.")
+                        cargarJugadorRecordBD()
+                    } else {
+                        Log.d(TAG_LOG, "Puntuación actual ($nivelActual) no supera la del récord de '$nombreJugador' (${jugadorExistente.max}). No se actualiza en Room.") // Acceso a 'max' actualizado
+                    }
+                } else {
+                    Log.d(TAG_LOG, "Jugador '$nombreJugador' no encontrado en Room. Creando nuevo registro en BD con nivel: $nivelActual")
+                    val nuevoJugador = Jugador(nombre = nombreJugador, max = nivelActual)
+                    jugadorDao.insertarJugador(nuevoJugador)
+                    Log.d(TAG_LOG, "Nuevo jugador '$nombreJugador' insertado en la base de datos Room.")
+                    cargarJugadorRecordBD()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG_LOG, "Error al interactuar con la base de datos Room en perderJuego: ${e.message}", e)
+            }
         }
 
         _estadoActual.value = Estados.JUEGO_PERDIDO
